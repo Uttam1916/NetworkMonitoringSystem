@@ -12,7 +12,7 @@ while True:
     latency = ping("8.8.8.8")
 
     # Event detection + edge filtering
-    if latency and latency > 0.2:
+    if latency and latency:
 
         message = f"node1|LATENCY_HIGH|{latency}"
 
