@@ -1,19 +1,14 @@
 import socket
+import ssl
 import threading
 import time
 from collections import defaultdict
-from cryptography.fernet import Fernet
 
 HOST = "0.0.0.0"
 PORT = 9000
 
-KEY = b'4N0zPj3C9j2mA2y7eFzQ4jYx6yXr0cZy4Yp9sL9Q6V0='
-cipher = Fernet(KEY)
-
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((HOST, PORT))
-
-print("Monitoring server running on port", PORT)
+CERT = "cert.pem"
+KEY = "key.pem"
 
 nodes = {}
 event_counts = defaultdict(int)
@@ -22,38 +17,47 @@ last_seq = {}
 lock = threading.Lock()
 
 
-def receiver():
+def handle_client(conn, addr):
+
+    global nodes
+
+    print("Client connected:", addr)
 
     while True:
-
-        data, addr = sock.recvfrom(4096)
-
         try:
-            decrypted = cipher.decrypt(data).decode()
-            node, seq, ts, event, metric, value = decrypted.split("|")
+            data = conn.recv(4096)
+
+            if not data:
+                break
+
+            msg = data.decode()
+            node, seq, ts, event, metric, value = msg.split("|")
 
             seq = int(seq)
             ts = int(ts)
 
-        except Exception:
-            print("Invalid packet received")
-            continue
+            with lock:
 
-        with lock:
+                if node not in nodes:
+                    nodes[node] = {}
 
-            if node not in nodes:
-                nodes[node] = {}
+                if node in last_seq and seq != last_seq[node] + 1:
+                    print("Packet loss suspected from", node)
 
-            if node in last_seq and seq != last_seq[node] + 1:
-                print("Packet loss suspected from", node)
+                last_seq[node] = seq
 
-            last_seq[node] = seq
+                nodes[node]["ip"] = addr[0]
+                nodes[node]["last_seen"] = ts
+                nodes[node]["event"] = (event, metric, value)
 
-            nodes[node]["ip"] = addr[0]
-            nodes[node]["last_seen"] = ts
-            nodes[node]["event"] = (event, metric, value)
+                event_counts[event] += 1
 
-            event_counts[event] += 1
+        except Exception as e:
+            print("Client error:", e)
+            break
+
+    conn.close()
+    print("Client disconnected:", addr)
 
 
 def dashboard():
@@ -98,6 +102,30 @@ def dashboard():
             print("=====================================")
 
 
-threading.Thread(target=receiver, daemon=True).start()
+def start_server():
 
-dashboard()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind((HOST, PORT))
+    sock.listen(5)
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=CERT, keyfile=KEY)
+
+    print("Secure monitoring server running on port", PORT)
+
+    threading.Thread(target=dashboard, daemon=True).start()
+
+    while True:
+
+        client, addr = sock.accept()
+
+        secure_conn = context.wrap_socket(client, server_side=True)
+
+        threading.Thread(
+            target=handle_client,
+            args=(secure_conn, addr),
+            daemon=True
+        ).start()
+
+
+start_server()
