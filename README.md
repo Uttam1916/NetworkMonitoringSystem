@@ -60,11 +60,11 @@ Web Dashboard (Visualization)
 
 ## Tech Stack
 
-- **Languages:** Go / Python (depending on your implementation)
+- **Languages:** Python 
 - **Networking:** UDP Sockets
-- **Backend:** REST APIs / Event handlers
-- **Frontend:** HTML/CSS/JS (or React if used)
-- **Tools:** Docker, Git, Linux
+- **Backend:** Event handlers
+- **Frontend:** HTML/CSS
+- **Tools:** Git
 
 ---
 
