@@ -2,14 +2,17 @@ import socket
 import threading
 import time
 from cryptography.fernet import Fernet
+
 from config import *
 from state import nodes, event_counts, last_seq, lock
-from database import insert_event
+from database import insert_event, insert_rtt
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((HOST, PORT))
 
 cipher = Fernet(KEY)
+
+send_times = {}
 
 print("UDP Monitoring Server Running...")
 
@@ -25,14 +28,14 @@ def receiver():
             seq = int(seq)
             ts = int(ts)
 
-        except Exception as e:
-            print("Invalid packet:", e)
+        except Exception:
             continue
 
+        now = time.time()
+
         with lock:
-            # Packet loss detection
             if node in last_seq and seq != last_seq[node] + 1:
-                print(f"[LOSS] Packet loss from {node}")
+                print(f"[LOSS] {node}")
 
             last_seq[node] = seq
 
@@ -46,11 +49,15 @@ def receiver():
 
             event_counts[event] += 1
 
-            insert_event(node, ts, event, metric, value)
+        insert_event(node, ts, event, metric, value)
 
-        print(f"[RECV] {node} -> {event} ({metric}={value})")
+        print(f"[RECV] {node} -> {event}")
 
-        # ACK (basic reliability)
+        # RTT tracking
+        if (node, seq) in send_times:
+            rtt = now - send_times.pop((node, seq))
+            insert_rtt(node, seq, rtt)
+
         sock.sendto(f"ACK|{node}|{seq}".encode(), addr)
 
 

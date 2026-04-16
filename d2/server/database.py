@@ -1,7 +1,14 @@
+import os
 import sqlite3
+import time
 
-conn = sqlite3.connect("events.db", check_same_thread=False)
+DB_PATH = os.path.join(os.path.dirname(__file__), "events.db")
+
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+conn.row_factory = sqlite3.Row
 cur = conn.cursor()
+
+# ---- tables ----
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS events (
@@ -12,8 +19,33 @@ CREATE TABLE IF NOT EXISTS events (
     value TEXT
 )
 """)
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS ack_log (
+    node TEXT,
+    seq INTEGER,
+    rtt REAL,
+    timestamp REAL
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS perf_history (
+    captured_at INTEGER,
+    avg_rtt_ms REAL,
+    p99_rtt_ms REAL,
+    events_per_sec REAL
+)
+""")
+
 conn.commit()
 
+
+def get_db():
+    return conn
+
+
+# ---- events ----
 
 def insert_event(node, ts, event, metric, value):
     cur.execute(
@@ -23,6 +55,66 @@ def insert_event(node, ts, event, metric, value):
     conn.commit()
 
 
-def get_events():
-    cur.execute("SELECT * FROM events ORDER BY timestamp DESC LIMIT 50")
-    return cur.fetchall()
+def get_events(limit=100, node_filter="", event_filter=""):
+    query = "SELECT * FROM events WHERE 1=1"
+    params = []
+
+    if node_filter:
+        query += " AND node LIKE ?"
+        params.append(f"%{node_filter}%")
+
+    if event_filter:
+        query += " AND event LIKE ?"
+        params.append(f"%{event_filter}%")
+
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+
+    rows = cur.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---- RTT ----
+
+def insert_rtt(node, seq, rtt):
+    cur.execute(
+        "INSERT INTO ack_log VALUES (?, ?, ?, ?)",
+        (node, seq, rtt, time.time()),
+    )
+    conn.commit()
+
+
+def get_rtt_stats(since_ts):
+    rows = cur.execute(
+        "SELECT rtt FROM ack_log WHERE timestamp >= ?",
+        (since_ts,),
+    ).fetchall()
+
+    if not rows:
+        return {"avg": 0, "p99": 0}
+
+    values = [r["rtt"] * 1000 for r in rows]  # convert to ms
+    values.sort()
+
+    avg = sum(values) / len(values)
+    p99 = values[int(0.99 * len(values))]
+
+    return {"avg": round(avg, 2), "p99": round(p99, 2)}
+
+
+# ---- perf history ----
+
+def insert_perf(avg, p99, eps):
+    cur.execute(
+        "INSERT INTO perf_history VALUES (?, ?, ?, ?)",
+        (int(time.time()), avg, p99, eps),
+    )
+    conn.commit()
+
+
+def get_perf_history(limit=60):
+    rows = cur.execute(
+        "SELECT * FROM perf_history ORDER BY captured_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
