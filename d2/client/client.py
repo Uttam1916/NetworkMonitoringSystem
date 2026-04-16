@@ -70,6 +70,9 @@ def send_event(event, metric, value):
         if ack[0] == "ACK" and int(ack[2]) == s:
             rtt = (time.time() - send_times.pop(s)) * 1000
             print(f"[ACK] {event:<25} RTT={rtt:.1f}ms")
+
+            # send RTT to server
+            send_event("RTT", "rtt_ms", round(rtt, 2))
             return
 
     except:

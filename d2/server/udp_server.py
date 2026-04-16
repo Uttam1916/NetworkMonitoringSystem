@@ -31,10 +31,12 @@ def handle_packet(data, addr):
     except:
         return
 
-    # ---- RTT (critical fix) ----
-    rtt = recv_time - ts
-    insert_rtt(node, seq, rtt)
-
+# ---- RTT from client (correct) ----
+    if event == "RTT":
+        try:
+            insert_rtt(node, seq, float(value) / 1000)
+        except:
+            pass
     # ---- STATE ----
     with state.lock:
         # packet loss detection
