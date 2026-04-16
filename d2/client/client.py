@@ -1,7 +1,6 @@
 import socket
 import time
 import uuid
-import threading
 from collections import deque
 
 import psutil
@@ -12,11 +11,13 @@ SERVER_IP = "192.168.137.1"
 PORT = 9000
 KEY = b'4N0zPj3C9j2mA2y7eFzQ4jYx6yXr0cZy4Yp9sL9Q6V0='
 
-HEARTBEAT_INTERVAL = 3
+INTERVAL = 3
 COOLDOWN = 10
 
 # ---- SETUP ----
 NODE_ID = f"node-{uuid.uuid4().hex[:8]}"
+START_TIME = time.time()
+
 cipher = Fernet(KEY)
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -25,13 +26,12 @@ sock.settimeout(1)
 seq = 0
 last_sent = {}
 
-# ---- RTT / LOSS ----
+# ---- TRACKING ----
 send_times = {}
 sent = 0
 dropped = 0
 
-latency_history = deque(maxlen=10)
-
+latency_hist = deque(maxlen=10)
 
 # ---- HELPERS ----
 def next_seq():
@@ -69,7 +69,7 @@ def send_event(event, metric, value):
 
         if ack[0] == "ACK" and int(ack[2]) == s:
             rtt = (time.time() - send_times.pop(s)) * 1000
-            print(f"[ACK] {event} RTT={rtt:.1f}ms")
+            print(f"[ACK] {event:<25} RTT={rtt:.1f}ms")
             return
 
     except:
@@ -80,7 +80,8 @@ def send_event(event, metric, value):
 # ---- METRICS ----
 
 def heartbeat():
-    send_event("HEARTBEAT", "status", "alive")
+    uptime = int(time.time() - START_TIME)
+    send_event("HEARTBEAT", "uptime_s", uptime)
 
 
 def cpu():
@@ -100,8 +101,15 @@ def memory():
 
 
 def disk():
-    val = psutil.disk_usage('/').percent
-    send_event("DISK_USAGE", "disk_pct", val)
+    try:
+        path = "C:\\" if psutil.WINDOWS else "/"
+        val = psutil.disk_usage(path).percent
+        send_event("DISK_USAGE", "disk_pct", val)
+
+        if val > 90 and should_alert("DISK_USAGE_HIGH"):
+            send_event("DISK_USAGE_HIGH", "disk_pct", val)
+    except:
+        pass
 
 
 def latency():
@@ -110,15 +118,16 @@ def latency():
         socket.create_connection(("8.8.8.8", 53), timeout=2).close()
         l = (time.time() - start) * 1000
     except:
-        send_event("NETWORK_FAILURE", "latency", 0)
+        if should_alert("NETWORK_FAILURE"):
+            send_event("NETWORK_FAILURE", "latency_ms", 0)
         return
 
-    latency_history.append(l)
+    latency_hist.append(l)
 
     send_event("NETWORK_LATENCY", "latency_ms", round(l, 2))
 
-    if len(latency_history) > 1:
-        jitter = max(latency_history) - min(latency_history)
+    if len(latency_hist) > 1:
+        jitter = max(latency_hist) - min(latency_hist)
         send_event("NETWORK_JITTER", "jitter_ms", round(jitter, 2))
 
     if l > 100 and should_alert("LATENCY_HIGH"):
@@ -126,8 +135,6 @@ def latency():
 
 
 def bandwidth():
-    global last_net, last_time
-
     now = time.time()
     curr = psutil.net_io_counters()
 
@@ -146,6 +153,9 @@ def bandwidth():
 
     send_event("BANDWIDTH_USAGE", "bps", int(rate))
 
+    if rate > 10_000_000 and should_alert("BANDWIDTH_SPIKE"):
+        send_event("BANDWIDTH_SPIKE", "bps", int(rate))
+
 
 def connections():
     try:
@@ -158,21 +168,26 @@ def connections():
 def packet_loss():
     if sent == 0:
         return
+
     loss = (dropped / sent) * 100
     send_event("PACKET_LOSS", "loss_pct", round(loss, 2))
 
 
-# ---- MAIN ----
+# ---- MAIN LOOP ----
 print("Client started:", NODE_ID)
 
 while True:
-    heartbeat()
-    cpu()
-    memory()
-    disk()
-    latency()
-    bandwidth()
-    connections()
-    packet_loss()
+    try:
+        heartbeat()
+        cpu()
+        memory()
+        disk()
+        latency()
+        bandwidth()
+        connections()
+        packet_loss()
 
-    time.sleep(HEARTBEAT_INTERVAL)
+    except Exception as e:
+        print("[ERROR]", e)
+
+    time.sleep(INTERVAL)

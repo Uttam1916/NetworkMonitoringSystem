@@ -21,16 +21,19 @@ def get_cursor():
 def init_db():
     cur = get_cursor()
 
+    # EVENTS (with severity)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS events (
         node TEXT,
         timestamp INTEGER,
         event TEXT,
         metric TEXT,
-        value TEXT
+        value TEXT,
+        severity TEXT
     )
     """)
 
+    # RTT LOG
     cur.execute("""
     CREATE TABLE IF NOT EXISTS ack_log (
         node TEXT,
@@ -40,6 +43,7 @@ def init_db():
     )
     """)
 
+    # PERF HISTORY
     cur.execute("""
     CREATE TABLE IF NOT EXISTS perf_history (
         captured_at INTEGER,
@@ -55,14 +59,28 @@ def init_db():
 init_db()
 
 # ------------------------------------------------------------------
+# SEVERITY LOGIC
+# ------------------------------------------------------------------
+
+def get_severity(event):
+    if "FAIL" in event or "DOWN" in event:
+        return "CRITICAL"
+    if "HIGH" in event or "THRESHOLD" in event or "SPIKE" in event:
+        return "WARNING"
+    return "INFO"
+
+
+# ------------------------------------------------------------------
 # EVENTS
 # ------------------------------------------------------------------
 
 def insert_event(node, ts, event, metric, value):
+    severity = get_severity(event)
+
     cur = get_cursor()
     cur.execute(
-        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
-        (node, ts, event, metric, value),
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?)",
+        (node, ts, event, metric, value, severity),
     )
     conn.commit()
 

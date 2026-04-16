@@ -6,6 +6,7 @@ from cryptography.fernet import Fernet
 import config
 import state
 import database
+from database import insert_rtt
 
 # ---- SOCKET ----
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -16,21 +17,25 @@ cipher = Fernet(config.KEY)
 print(f"[UDP] Server running on {config.HOST}:{config.PORT}")
 
 
-# ---- PACKET HANDLER ----
+# ---- HANDLE PACKET ----
 def handle_packet(data, addr):
     try:
+        recv_time = time.time()
+
         msg = cipher.decrypt(data).decode()
         node, seq, ts, event, metric, value = msg.split("|")
 
         seq = int(seq)
         ts = int(ts)
 
-    except Exception:
+    except:
         return
 
-    now = time.time()
+    # ---- RTT (critical fix) ----
+    rtt = recv_time - ts
+    insert_rtt(node, seq, rtt)
 
-    # ---- STATE UPDATE ----
+    # ---- STATE ----
     with state.lock:
         # packet loss detection
         if node in state.last_seq and seq != state.last_seq[node] + 1:
@@ -47,17 +52,17 @@ def handle_packet(data, addr):
 
         state.event_counts[event] += 1
 
-    # ---- DB WRITE ----
+    # ---- STORE EVENT ----
     database.insert_event(node, ts, event, metric, value)
 
     # ---- ACK ----
     try:
-        ack = f"ACK|{node}|{seq}|{int(now*1000)}"
+        ack = f"ACK|{node}|{seq}|{int(time.time()*1000)}"
         sock.sendto(ack.encode(), addr)
     except:
         pass
 
-    print(f"[RECV] {node} {event} {metric}={value}")
+    print(f"[RECV] {node} | {event} | {metric}={value}")
 
 
 # ---- RECEIVER LOOP ----
@@ -65,16 +70,18 @@ def receiver():
     while True:
         try:
             data, addr = sock.recvfrom(8192)
+
             threading.Thread(
                 target=handle_packet,
                 args=(data, addr),
                 daemon=True
             ).start()
-        except:
-            pass
+
+        except Exception as e:
+            print("[ERROR] receiver:", e)
 
 
-# ---- PERF COLLECTOR (CRITICAL FOR UI) ----
+# ---- PERF COLLECTOR (drives charts) ----
 def perf_collector():
     while True:
         try:
@@ -82,7 +89,7 @@ def perf_collector():
 
             cur = database.get_db().cursor()
 
-            # events/sec
+            # ---- events/sec ----
             count = cur.execute(
                 "SELECT COUNT(*) FROM events WHERE timestamp >= ?",
                 (now - 5,)
@@ -90,17 +97,16 @@ def perf_collector():
 
             eps = count / 5
 
-            # RTT stats (from DB)
+            # ---- RTT stats ----
             rtt = database.get_rtt_stats(time.time() - 60)
 
-            # packet loss %
-            total_nodes = len(state.nodes)
+            # ---- packet loss ----
             total_loss = sum(n.get("loss", 0) for n in state.nodes.values())
             total_seq = sum(state.last_seq.values()) or 1
 
             loss_pct = (total_loss / total_seq) * 100
 
-            # store snapshot
+            # ---- store snapshot ----
             database.insert_perf(
                 rtt["avg"],
                 rtt["p99"],
