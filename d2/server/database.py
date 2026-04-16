@@ -4,21 +4,20 @@ import time
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "events.db")
 
+# ---- CONNECTION ----
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.row_factory = sqlite3.Row
 
 
-# ---- helpers ----
-
 def get_db():
     return conn
+
 
 def get_cursor():
     return conn.cursor()
 
 
-# ---- tables ----
-
+# ---- INIT ----
 def init_db():
     cur = get_cursor()
 
@@ -55,8 +54,9 @@ def init_db():
 
 init_db()
 
-
-# ---- events ----
+# ------------------------------------------------------------------
+# EVENTS
+# ------------------------------------------------------------------
 
 def insert_event(node, ts, event, metric, value):
     cur = get_cursor()
@@ -88,7 +88,15 @@ def get_events(limit=100, node_filter="", event_filter=""):
     return [dict(r) for r in rows]
 
 
-# ---- RTT ----
+def get_total_event_count():
+    cur = get_cursor()
+    row = cur.execute("SELECT COUNT(*) as c FROM events").fetchone()
+    return row["c"] if row else 0
+
+
+# ------------------------------------------------------------------
+# RTT
+# ------------------------------------------------------------------
 
 def insert_rtt(node, seq, rtt):
     cur = get_cursor()
@@ -116,16 +124,21 @@ def get_rtt_stats(since_ts):
     avg = sum(values) / len(values)
     p99 = values[int(0.99 * len(values))]
 
-    return {"avg": round(avg, 2), "p99": round(p99, 2)}
+    return {
+        "avg": round(avg, 2),
+        "p99": round(p99, 2)
+    }
 
 
-# ---- perf history ----
+# ------------------------------------------------------------------
+# PERF HISTORY (for charts)
+# ------------------------------------------------------------------
 
-def insert_perf(avg, p99, eps):
+def insert_perf(avg_rtt, p99_rtt, eps):
     cur = get_cursor()
     cur.execute(
         "INSERT INTO perf_history VALUES (?, ?, ?, ?)",
-        (int(time.time()), avg, p99, eps),
+        (int(time.time()), avg_rtt, p99_rtt, eps),
     )
     conn.commit()
 
@@ -136,4 +149,5 @@ def get_perf_history(limit=60):
         "SELECT * FROM perf_history ORDER BY captured_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
+
     return [dict(r) for r in rows]

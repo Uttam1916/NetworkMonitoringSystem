@@ -3,65 +3,127 @@ import threading
 import time
 from cryptography.fernet import Fernet
 
-from config import *
-from state import nodes, event_counts, last_seq, lock
-from database import insert_event, insert_rtt
+import config
+import state
+import database
 
+# ---- SOCKET ----
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((HOST, PORT))
+sock.bind((config.HOST, config.PORT))
 
-cipher = Fernet(KEY)
+cipher = Fernet(config.KEY)
 
-send_times = {}
-
-print("UDP Monitoring Server Running...")
+print(f"[UDP] Server running on {config.HOST}:{config.PORT}")
 
 
+# ---- PACKET HANDLER ----
+def handle_packet(data, addr):
+    try:
+        msg = cipher.decrypt(data).decode()
+        node, seq, ts, event, metric, value = msg.split("|")
+
+        seq = int(seq)
+        ts = int(ts)
+
+    except Exception:
+        return
+
+    now = time.time()
+
+    # ---- STATE UPDATE ----
+    with state.lock:
+        # packet loss detection
+        if node in state.last_seq and seq != state.last_seq[node] + 1:
+            state.nodes.setdefault(node, {}).setdefault("loss", 0)
+            state.nodes[node]["loss"] += 1
+
+        state.last_seq[node] = seq
+
+        state.nodes[node] = {
+            "ip": addr[0],
+            "last_seen": ts,
+            "last_event": event,
+        }
+
+        state.event_counts[event] += 1
+
+    # ---- DB WRITE ----
+    database.insert_event(node, ts, event, metric, value)
+
+    # ---- ACK ----
+    try:
+        ack = f"ACK|{node}|{seq}|{int(now*1000)}"
+        sock.sendto(ack.encode(), addr)
+    except:
+        pass
+
+    print(f"[RECV] {node} {event} {metric}={value}")
+
+
+# ---- RECEIVER LOOP ----
 def receiver():
     while True:
-        data, addr = sock.recvfrom(4096)
-
         try:
-            decrypted = cipher.decrypt(data).decode()
-            node, seq, ts, event, metric, value = decrypted.split("|")
-
-            seq = int(seq)
-            ts = int(ts)
-
-        except Exception:
-            continue
-
-        now = time.time()
-
-        with lock:
-            if node in last_seq and seq != last_seq[node] + 1:
-                print(f"[LOSS] {node}")
-
-            last_seq[node] = seq
-
-            severity = EVENT_TYPES.get(event, "UNKNOWN")
-
-            nodes[node] = {
-                "ip": addr[0],
-                "last_seen": ts,
-                "event": (event, metric, value, severity),
-            }
-
-            event_counts[event] += 1
-
-        insert_event(node, ts, event, metric, value)
-
-        print(f"[RECV] {node} -> {event}")
-
-        # RTT tracking
-        if (node, seq) in send_times:
-            rtt = now - send_times.pop((node, seq))
-            insert_rtt(node, seq, rtt)
-
-        sock.sendto(f"ACK|{node}|{seq}".encode(), addr)
+            data, addr = sock.recvfrom(8192)
+            threading.Thread(
+                target=handle_packet,
+                args=(data, addr),
+                daemon=True
+            ).start()
+        except:
+            pass
 
 
+# ---- PERF COLLECTOR (CRITICAL FOR UI) ----
+def perf_collector():
+    while True:
+        try:
+            now = int(time.time())
+
+            cur = database.get_db().cursor()
+
+            # events/sec
+            count = cur.execute(
+                "SELECT COUNT(*) FROM events WHERE timestamp >= ?",
+                (now - 5,)
+            ).fetchone()[0]
+
+            eps = count / 5
+
+            # RTT stats (from DB)
+            rtt = database.get_rtt_stats(time.time() - 60)
+
+            # packet loss %
+            total_nodes = len(state.nodes)
+            total_loss = sum(n.get("loss", 0) for n in state.nodes.values())
+            total_seq = sum(state.last_seq.values()) or 1
+
+            loss_pct = (total_loss / total_seq) * 100
+
+            # store snapshot
+            database.insert_perf(
+                rtt["avg"],
+                rtt["p99"],
+                eps
+            )
+
+        except Exception as e:
+            print("[PERF ERROR]", e)
+
+        time.sleep(3)
+
+
+# ---- START THREADS ----
 threading.Thread(target=receiver, daemon=True).start()
+threading.Thread(target=perf_collector, daemon=True).start()
 
+
+# ---- MAIN LOOP ----
 while True:
-    time.sleep(1)
+    time.sleep(5)
+
+    with state.lock:
+        print(
+            f"[STAT] nodes={len(state.nodes)} "
+            f"events={sum(state.event_counts.values())}"
+        )

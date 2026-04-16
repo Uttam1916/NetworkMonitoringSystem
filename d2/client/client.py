@@ -1,31 +1,46 @@
 import socket
 import time
-import psutil
-from ping3 import ping
-from cryptography.fernet import Fernet
 import uuid
 import threading
+from collections import deque
 
-SERVER_IP = "10.42.249.149"
+import psutil
+from cryptography.fernet import Fernet
+
+# ---- CONFIG ----
+SERVER_IP = "192.168.137.1"
 PORT = 9000
-
-NODE_ID = f"node-{uuid.uuid4().hex[:6]}"
-
 KEY = b'4N0zPj3C9j2mA2y7eFzQ4jYx6yXr0cZy4Yp9sL9Q6V0='
+
+HEARTBEAT_INTERVAL = 3
+COOLDOWN = 10
+
+# ---- SETUP ----
+NODE_ID = f"node-{uuid.uuid4().hex[:8]}"
 cipher = Fernet(KEY)
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(1)
 
 seq = 0
-
-COOLDOWN = 10
 last_sent = {}
 
-# for RTT tracking
+# ---- RTT / LOSS ----
 send_times = {}
+sent = 0
+dropped = 0
+
+latency_history = deque(maxlen=10)
 
 
-def should_send(event):
+# ---- HELPERS ----
+def next_seq():
+    global seq
+    seq += 1
+    return seq
+
+
+def should_alert(event):
     now = time.time()
     if event not in last_sent or now - last_sent[event] > COOLDOWN:
         last_sent[event] = now
@@ -33,42 +48,33 @@ def should_send(event):
     return False
 
 
+# ---- SEND ----
 def send_event(event, metric, value):
-    global seq
-    seq += 1
+    global sent, dropped
 
+    s = next_seq()
     ts = int(time.time())
-    msg = f"{NODE_ID}|{seq}|{ts}|{event}|{metric}|{value}"
 
+    msg = f"{NODE_ID}|{s}|{ts}|{event}|{metric}|{value}"
     encrypted = cipher.encrypt(msg.encode())
 
-    # store send time for RTT
-    send_times[(NODE_ID, seq)] = time.time()
+    send_times[s] = time.time()
+    sent += 1
 
-    sock.sendto(encrypted, (SERVER_IP, PORT))
+    try:
+        sock.sendto(encrypted, (SERVER_IP, PORT))
 
-    print(f"[SEND] {event} ({metric}={value})")
+        data, _ = sock.recvfrom(1024)
+        ack = data.decode().split("|")
 
+        if ack[0] == "ACK" and int(ack[2]) == s:
+            rtt = (time.time() - send_times.pop(s)) * 1000
+            print(f"[ACK] {event} RTT={rtt:.1f}ms")
+            return
 
-# ---- ACK RECEIVER ----
-
-def receive_ack():
-    while True:
-        try:
-            data, _ = sock.recvfrom(1024)
-            msg = data.decode()
-
-            if msg.startswith("ACK"):
-                _, node, seq_str = msg.split("|")
-                seq_num = int(seq_str)
-
-                key = (node, seq_num)
-                if key in send_times:
-                    rtt = time.time() - send_times.pop(key)
-                    print(f"[RTT] {rtt*1000:.2f} ms")
-
-        except:
-            pass
+    except:
+        dropped += 1
+        print(f"[DROP] {event}")
 
 
 # ---- METRICS ----
@@ -77,44 +83,96 @@ def heartbeat():
     send_event("HEARTBEAT", "status", "alive")
 
 
-def check_cpu():
-    cpu = psutil.cpu_percent(interval=1)
-    if cpu > 80 and should_send("CPU_THRESHOLD_EXCEEDED"):
-        send_event("CPU_THRESHOLD_EXCEEDED", "cpu", cpu)
+def cpu():
+    val = psutil.cpu_percent(interval=0.3)
+    send_event("CPU_USAGE", "cpu_pct", val)
+
+    if val > 80 and should_alert("CPU_THRESHOLD_EXCEEDED"):
+        send_event("CPU_THRESHOLD_EXCEEDED", "cpu_pct", val)
 
 
-def check_memory():
-    mem = psutil.virtual_memory().percent
-    if mem > 80 and should_send("MEMORY_THRESHOLD_EXCEEDED"):
-        send_event("MEMORY_THRESHOLD_EXCEEDED", "memory", mem)
+def memory():
+    val = psutil.virtual_memory().percent
+    send_event("MEMORY_USAGE", "mem_pct", val)
+
+    if val > 80 and should_alert("MEMORY_THRESHOLD_EXCEEDED"):
+        send_event("MEMORY_THRESHOLD_EXCEEDED", "mem_pct", val)
 
 
-def check_latency():
+def disk():
+    val = psutil.disk_usage('/').percent
+    send_event("DISK_USAGE", "disk_pct", val)
+
+
+def latency():
     try:
-        latency = ping("8.8.8.8", timeout=1)
+        start = time.time()
+        socket.create_connection(("8.8.8.8", 53), timeout=2).close()
+        l = (time.time() - start) * 1000
     except:
+        send_event("NETWORK_FAILURE", "latency", 0)
         return
 
-    if latency is None:
-        send_event("NETWORK_FAILURE", "latency", 0)
-    elif latency > 0.1 and should_send("LATENCY_HIGH"):
-        send_event("LATENCY_HIGH", "latency", round(latency, 4))
+    latency_history.append(l)
+
+    send_event("NETWORK_LATENCY", "latency_ms", round(l, 2))
+
+    if len(latency_history) > 1:
+        jitter = max(latency_history) - min(latency_history)
+        send_event("NETWORK_JITTER", "jitter_ms", round(jitter, 2))
+
+    if l > 100 and should_alert("LATENCY_HIGH"):
+        send_event("LATENCY_HIGH", "latency_ms", l)
 
 
-# ---- START ----
+def bandwidth():
+    global last_net, last_time
 
-print(f"Client started: {NODE_ID}")
+    now = time.time()
+    curr = psutil.net_io_counters()
 
-threading.Thread(target=receive_ack, daemon=True).start()
+    if not hasattr(bandwidth, "last"):
+        bandwidth.last = curr
+        bandwidth.last_time = now
+        return
 
-try:
-    while True:
-        heartbeat()
-        check_cpu()
-        check_memory()
-        check_latency()
-        time.sleep(3)
+    delta = (curr.bytes_sent - bandwidth.last.bytes_sent +
+             curr.bytes_recv - bandwidth.last.bytes_recv)
 
-except Exception as e:
-    print("ERROR:", e)
-    input("Press Enter to exit...")
+    rate = delta / (now - bandwidth.last_time)
+
+    bandwidth.last = curr
+    bandwidth.last_time = now
+
+    send_event("BANDWIDTH_USAGE", "bps", int(rate))
+
+
+def connections():
+    try:
+        c = len([x for x in psutil.net_connections() if x.status == "ESTABLISHED"])
+        send_event("TCP_CONNECTIONS", "count", c)
+    except:
+        pass
+
+
+def packet_loss():
+    if sent == 0:
+        return
+    loss = (dropped / sent) * 100
+    send_event("PACKET_LOSS", "loss_pct", round(loss, 2))
+
+
+# ---- MAIN ----
+print("Client started:", NODE_ID)
+
+while True:
+    heartbeat()
+    cpu()
+    memory()
+    disk()
+    latency()
+    bandwidth()
+    connections()
+    packet_loss()
+
+    time.sleep(HEARTBEAT_INTERVAL)
