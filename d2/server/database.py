@@ -6,48 +6,60 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "events.db")
 
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.row_factory = sqlite3.Row
-cur = conn.cursor()
 
-# ---- tables ----
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS events (
-    node TEXT,
-    timestamp INTEGER,
-    event TEXT,
-    metric TEXT,
-    value TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS ack_log (
-    node TEXT,
-    seq INTEGER,
-    rtt REAL,
-    timestamp REAL
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS perf_history (
-    captured_at INTEGER,
-    avg_rtt_ms REAL,
-    p99_rtt_ms REAL,
-    events_per_sec REAL
-)
-""")
-
-conn.commit()
-
+# ---- helpers ----
 
 def get_db():
     return conn
+
+def get_cursor():
+    return conn.cursor()
+
+
+# ---- tables ----
+
+def init_db():
+    cur = get_cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS events (
+        node TEXT,
+        timestamp INTEGER,
+        event TEXT,
+        metric TEXT,
+        value TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS ack_log (
+        node TEXT,
+        seq INTEGER,
+        rtt REAL,
+        timestamp REAL
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS perf_history (
+        captured_at INTEGER,
+        avg_rtt_ms REAL,
+        p99_rtt_ms REAL,
+        events_per_sec REAL
+    )
+    """)
+
+    conn.commit()
+
+
+init_db()
 
 
 # ---- events ----
 
 def insert_event(node, ts, event, metric, value):
+    cur = get_cursor()
     cur.execute(
         "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
         (node, ts, event, metric, value),
@@ -56,6 +68,8 @@ def insert_event(node, ts, event, metric, value):
 
 
 def get_events(limit=100, node_filter="", event_filter=""):
+    cur = get_cursor()
+
     query = "SELECT * FROM events WHERE 1=1"
     params = []
 
@@ -77,6 +91,7 @@ def get_events(limit=100, node_filter="", event_filter=""):
 # ---- RTT ----
 
 def insert_rtt(node, seq, rtt):
+    cur = get_cursor()
     cur.execute(
         "INSERT INTO ack_log VALUES (?, ?, ?, ?)",
         (node, seq, rtt, time.time()),
@@ -85,6 +100,8 @@ def insert_rtt(node, seq, rtt):
 
 
 def get_rtt_stats(since_ts):
+    cur = get_cursor()
+
     rows = cur.execute(
         "SELECT rtt FROM ack_log WHERE timestamp >= ?",
         (since_ts,),
@@ -93,7 +110,7 @@ def get_rtt_stats(since_ts):
     if not rows:
         return {"avg": 0, "p99": 0}
 
-    values = [r["rtt"] * 1000 for r in rows]  # convert to ms
+    values = [r["rtt"] * 1000 for r in rows]
     values.sort()
 
     avg = sum(values) / len(values)
@@ -105,6 +122,7 @@ def get_rtt_stats(since_ts):
 # ---- perf history ----
 
 def insert_perf(avg, p99, eps):
+    cur = get_cursor()
     cur.execute(
         "INSERT INTO perf_history VALUES (?, ?, ?, ?)",
         (int(time.time()), avg, p99, eps),
@@ -113,6 +131,7 @@ def insert_perf(avg, p99, eps):
 
 
 def get_perf_history(limit=60):
+    cur = get_cursor()
     rows = cur.execute(
         "SELECT * FROM perf_history ORDER BY captured_at DESC LIMIT ?",
         (limit,),
