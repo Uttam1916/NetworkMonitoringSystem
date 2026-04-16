@@ -73,6 +73,7 @@ def send_event(event, metric, value):
 
             # send RTT to server
             send_event("RTT", "rtt_ms", round(rtt, 2))
+            print(f"[RTT SENT] {rtt:.2f} ms")
             return
 
     except:
